@@ -38,6 +38,9 @@ from .cursors import Cursor
 from .utils import _pack_int24, _lenenc_int, _ConnectionContextManager, _ContextManager
 from .log import logger
 
+# MySQL caching_sha2_password scramble nonce length
+SCRAMBLE_LENGTH = 20
+
 try:
     DEFAULT_USER = getpass.getuser()
 except KeyError:
@@ -922,7 +925,17 @@ class Connection:
         if pkt.is_auth_switch_request():
             # Try from fast auth
             logger.debug("caching sha2: Trying fast path")
-            self.salt = pkt.read_all()
+
+            # AuthSwitchRequest auth-plugin-data is NULL-terminated.
+            # caching_sha2_password uses a 20-byte scramble/nonce.
+            # Some proxies, including RDS Proxy, may leave the trailing NUL
+            # in the packet payload. Including it changes the SHA2 scramble
+            # and can cause valid credentials to fail with 1045.
+            # FIX: Match PyMySQL's behavior by using only the 20-byte nonce.
+            # See https://github.com/mysql/mysql-server/blob/7d10c82196c8e45554f27c00681474a9fb86d137/sql/auth/sha2_password.cc#L939-L945
+            # https://github.com/PyMySQL/PyMySQL/issues/890
+            self.salt = pkt.read_all()[:SCRAMBLE_LENGTH]
+
             scrambled = _auth.scramble_caching_sha2(
                 self._password.encode('latin1'), self.salt
             )
